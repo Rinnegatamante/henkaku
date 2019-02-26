@@ -41,9 +41,18 @@ typedef struct {
   uint64_t padding;               /* UNKNOWN */
 } __attribute__((packed)) app_info_t;
 
+// from https://wiki.henkaku.xyz/vita/SceIofilemgr
+typedef struct io_scheduler_item { //size is 0x14 - allocated from SceIoScheduler heap
+   void *unk_0; // parent
+   uint32_t unk_4; // 0
+   uint32_t unk_8; // 0
+   uint32_t unk_C; // 0
+   uint32_t unk_10; // pointer to unknown module data section
+} io_scheduler_item;
+
 static henkaku_config_t config;
 
-static SceUID g_hooks[6];
+static SceUID g_hooks[7];
 
 static tai_hook_ref_t g_parse_headers_hook;
 static int parse_headers_patched(int ctx, const void *headers, size_t len, void *args) {
@@ -120,6 +129,14 @@ static int sceSblUsGetSpkgInfo_patched(int r0, uintptr_t out) {
     ver = config.spoofed_version;
     ksceKernelMemcpyKernelToUser(out+4, &ver, 4);
   }
+  return ret;
+}
+
+static tai_hook_ref_t g_io_scheduler_hook;
+static int io_scheduler_patched(io_scheduler_item *item, int r1) {
+  int ret = TAI_CONTINUE(int, g_io_scheduler_hook, item, r1);
+  if(ret == 0x80010013 &&item->unk_10 == 0x800) 
+    item->unk_10 = 1;
   return ret;
 }
 
@@ -232,6 +249,36 @@ int module_start(SceSize argc, const void *args) {
   } else {
     LOG("skipping version spoofing");
   }
+  tai_module_info_t tai_info;
+  memset(&tai_info,0,sizeof(tai_module_info_t));
+  tai_info.size = sizeof(tai_module_info_t);
+  taiGetModuleInfoForKernel(KERNEL_PID, "SceIofilemgr", &tai_info);
+  switch(tai_info.module_nid) {
+  case 0xA96ACE9D: // 3.65
+  case 0x90DA33DE: // 3.68
+    g_hooks[6] =  taiHookFunctionOffsetForKernel(KERNEL_PID,
+                                              &g_io_scheduler_hook,
+                                              tai_info.modid,
+                                              0,
+                                              0xB3D8,
+                                              1,
+                                              io_scheduler_patched);
+    break;
+  case 0x9642948C: // 3.60
+    g_hooks[6] =  taiHookFunctionOffsetForKernel(KERNEL_PID,
+                                              &g_io_scheduler_hook,
+                                              tai_info.modid,
+                                              0,
+                                              0xD400,
+                                              1,
+                                              io_scheduler_patched);
+    break;
+  default:
+    g_hooks[6] = -1;
+    break;
+  }
+  if (g_hooks[6] < 0) LOG("skipping io scheduler patch");
+  else LOG("io_scheduler_hook: %x", g_hooks[6]);
   if (argc == 4) {
     shell_pid = *(SceUID *)args;
     LOG("loading shell plugins");
@@ -253,5 +300,6 @@ int module_stop(SceSize argc, const void *args) {
     taiHookReleaseForKernel(g_hooks[4], g_sceKernelGetSystemSwVersion_hook);
     taiHookReleaseForKernel(g_hooks[5], g_sceSblUsGetSpkgInfo_hook);
   }
+  if (g_hooks[6] >= 0) taiHookReleaseForKernel(g_hooks[6], g_io_scheduler_hook);
   return SCE_KERNEL_STOP_SUCCESS;
 }
